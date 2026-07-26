@@ -7,7 +7,7 @@ class OrchestratorService {
 
   // Replace with your Ubuntu machine's IP address
   OrchestratorService({
-    this.baseUrl = 'https://ethack-genai.onrender.com',
+    this.baseUrl = 'https://signozhackathon-backend.onrender.com',
   });
 
   Future<bool> ping() async {

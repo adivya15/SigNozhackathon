@@ -23,7 +23,7 @@ class StorageService {
   final String backendBaseUrl;
 
   StorageService({
-    this.backendBaseUrl = 'https://ethack-genai.onrender.com',
+    this.backendBaseUrl = 'https://signozhackathon-backend.onrender.com',
   });
 
   

@@ -7,7 +7,7 @@ import 'package:http/http.dart' as http;
 /// 10.0.2.2 for Android emulator, adjust for other targets.
 class CaptureService {
   final String baseUrl;
-  CaptureService({this.baseUrl = 'https://ethack-genai.onrender.com'});
+  CaptureService({this.baseUrl = 'https://signozhackathon-backend.onrender.com'});
 
   Future<List<String>> fetchQuestions({String? equipmentId}) async {
     final uri = Uri.parse('$baseUrl/capture/questions').replace(

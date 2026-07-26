@@ -12,7 +12,7 @@ class ActionEngineService {
   ActionEngineService({
     // Keep this in sync with OrchestratorService's baseUrl — same
     // backend machine.
-    this.baseUrl = 'https://ethack-genai.onrender.com',
+    this.baseUrl = 'https://signozhackathon-backend.onrender.com',
   });
 
   Future<Map<String, dynamic>> generate({

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "252094082264",
+    "project_id": "atlasai-hackathon-sd-2026",
+    "storage_bucket": "atlasai-hackathon-sd-2026.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:252094082264:android:543be36ba29e026c2dbbad",
+        "android_client_info": {
+          "package_name": "com.example.atlasai_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCkWED1Zt1EA5roOsPgdyeITqR1kl1WI30"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
