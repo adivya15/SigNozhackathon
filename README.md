@@ -228,6 +228,19 @@ Hit the backend a few times (upload a doc, ask a few questions across different 
 
 ---
 
+## AI Usage Disclosure
+
+As permitted (and required to be declared) under the hackathon rules, we used **Claude** (Anthropic) during this build for:
+
+- Debugging Docker/Apple Silicon dependency issues and a HuggingFace API deprecation during setup
+- Reviewing and fixing a confidence-formula bug in the agent orchestrator
+- Drafting the OpenTelemetry instrumentation approach (spans, metrics) and this README/documentation
+- General code review and troubleshooting throughout the week
+
+All core product logic, agent design, and SigNoz dashboard/alert configuration were built and verified by the team.
+
+---
+
 ## Team
 
 **Team GenAI**
