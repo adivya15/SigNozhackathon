@@ -1,0 +1,251 @@
+import uuid
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+# Import telemetry FIRST — it sets the global tracer/meter providers
+# that every other app module (orchestrator, agents, services) reads
+# from at import time via app.telemetry.tracer / app.otel_metrics.*.
+from app.telemetry import instrument_fastapi_app
+
+from app.orchestrator import orchestrator
+from app.models.schemas import (
+    OrchestratorRequest,
+    OrchestratorResponse,
+    IngestResponse,
+    GraphNeighborsResponse,
+    GraphQueryResponse,
+    CaptureQuestionsResponse,
+    CaptureSubmitRequest,
+    CaptureSubmitResponse,
+    ActionGenerateRequest,
+    ActionGenerateResponse,
+)
+from app.services import ingestion
+from app.services import embeddings
+from app.services import entity_extraction
+from app.services import graph_service
+from app.services import lessons_learned_service
+from app.services import notification_service
+from app.services import capture_templates
+from app.services import action_engine
+from app.services.chroma_client import get_documents_collection
+
+app = FastAPI(title="AtlasAI Backend")
+instrument_fastapi_app(app)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/ping")
+async def ping():
+    return "pong"
+
+
+@app.post("/query", response_model=OrchestratorResponse)
+async def query(request: OrchestratorRequest):
+    response = await orchestrator.handle(request)
+
+    # Day 4: graph-enriched response — if the caller told us which
+    # equipment this is about, attach what the Knowledge Graph knows
+    # about it (linked SOPs, incidents, technicians, etc.) on top of
+    # whatever the agent(s) answered.
+    if request.equipment_id:
+        try:
+            response.graph_context = graph_service.graph_context_summary(
+                request.equipment_id.upper()
+            )
+        except Exception as e:
+            response.graph_context = ""
+            print(f"[/query] graph_context lookup failed: {e}", flush=True)
+
+    return response
+
+
+@app.post("/ingest", response_model=IngestResponse)
+async def ingest(
+    file: UploadFile = File(...),
+    equipment_id: str = Form(None),
+    technician_id: str = Form(None),
+):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF supported for ingestion.")
+
+    file_bytes = await file.read()
+    doc_id = str(uuid.uuid4())
+
+    try:
+        pages = ingestion.extract_pages(file_bytes)
+    except Exception as e:
+        raise HTTPException(422, f"Could not parse PDF: {e}")
+
+    full_text = "\n".join(pages)
+
+    # Day 4: full entity extraction (equipment tags + dates + personnel
+    # + document type).
+    entities = entity_extraction.extract_entities(full_text)
+    equipment_tags = entities["equipment_tags"]
+    if equipment_id and equipment_id.upper() not in equipment_tags:
+        equipment_tags.append(equipment_id.upper())
+        equipment_tags.sort()
+
+    doc_type = entities["doc_type"]
+
+    # Fold the uploader's technician_id (Day 5, passed by the Flutter
+    # app on every upload) into the same personnel list entity_extraction
+    # pulled from the document text, so both end up as graph edges
+    # without two separate code paths for "people connected to this doc".
+    personnel = list(entities["personnel"])
+    if technician_id and technician_id not in personnel:
+        personnel.append(technician_id)
+
+    # Day 5: check against historical incidents BEFORE this document's
+    # own chunks are added to the corpus, so it never matches itself.
+    similar_incidents = []
+    if doc_type == "incident":
+        similar_incidents = await lessons_learned_service.find_similar_incidents(
+            full_text, exclude_doc_id=doc_id, top_k=3,
+        )
+
+    # Day 4: full Knowledge Graph — equipment <-> SOPs <-> incidents <->
+    # technicians <-> maintenance records, persisted to Firestore (falls
+    # back to in-memory if Firebase Admin creds aren't set, so ingestion
+    # never breaks the demo — see firebase_admin_client.py).
+    graph_edges = graph_service.build_full_graph_edges(
+        doc_id=doc_id,
+        doc_type=doc_type,
+        equipment_tags=equipment_tags,
+        personnel=personnel,
+    )
+    graph_persisted = graph_service.persist_edges(graph_edges)
+
+    collection = get_documents_collection()
+    ids, docs, metadatas = [], [], []
+    for page_num, page_text in enumerate(pages, start=1):
+        for chunk in ingestion.chunk_text(page_text):
+            chunk_id = f"{doc_id}_p{page_num}_{uuid.uuid4().hex[:8]}"
+            ids.append(chunk_id)
+            docs.append(chunk)
+            metadatas.append({
+                "doc_id": doc_id,
+                "equipment_id": equipment_id or "",
+                "page": page_num,
+                "file_name": file.filename,
+                # Day 5: lessons_learned_service filters on this field —
+                # must be set on every chunk for incident matching to work.
+                "doc_type": doc_type,
+            })
+
+    if ids:
+        vectors = await embeddings.embed_batch(docs)
+        collection.add(ids=ids, documents=docs, metadatas=metadatas, embeddings=vectors)
+
+    # Day 5: opt-in push alert if this incident matched historical patterns.
+    alert_sent = False
+    if similar_incidents:
+        alert_sent = notification_service.send_lessons_learned_alert(
+            equipment_id=equipment_id or "",
+            doc_id=doc_id,
+            file_name=file.filename,
+            match_count=len(similar_incidents),
+        )
+
+    return IngestResponse(
+        docId=doc_id,
+        fileName=file.filename,
+        status="ingested" if ids else "failed",
+        pageCount=len(pages),
+        chunkCount=len(ids),
+        equipmentTags=equipment_tags,
+        graphEdges=graph_edges,
+        personnel=entities["personnel"],
+        dates=entities["dates"],
+        docType=doc_type,
+        graphPersistedToFirestore=graph_persisted,
+        similarIncidents=similar_incidents,
+        alertSent=alert_sent,
+    )
+
+
+@app.get("/graph/{entity_type}/{entity_id}", response_model=GraphNeighborsResponse)
+async def graph_neighbors(entity_type: str, entity_id: str):
+    """Day 4 — full graph traversal for any entity type. e.g.
+    GET /graph/equipment/PUMP-04 -> every document/person/incident
+    linked to Pump 4."""
+    return graph_service.get_neighbors(entity_type, entity_id.upper())
+
+
+@app.get("/graph/{equipment_id}", response_model=GraphQueryResponse)
+async def graph_for_equipment(equipment_id: str):
+    """Day 5 — flatter equipment-only shape ({connected: [...]})
+    consumed by maintenance_agent.py's graph-context enrichment."""
+    return graph_service.get_equipment_graph(equipment_id.upper())
+
+
+# --- Day 5: Knowledge Capture Agent ---
+
+@app.get("/capture/questions", response_model=CaptureQuestionsResponse)
+async def capture_questions(equipment_id: str = None):
+    """Returns the guided-interview question script for an equipment
+    kind (inferred from the tag prefix, e.g. PUMP-04 -> PUMP), or a
+    generic script if no equipment_id is given."""
+    questions = capture_templates.get_questions_for_equipment(equipment_id)
+    return CaptureQuestionsResponse(equipmentId=equipment_id, questions=questions)
+
+
+@app.post("/capture/submit", response_model=CaptureSubmitResponse)
+async def capture_submit(payload: CaptureSubmitRequest):
+    """Stores a completed voice/text interview as a knowledge card —
+    embedded and indexed immediately, so the Knowledge Agent can
+    surface it the same day."""
+    answered = [a for a in payload.answers if a.answer.strip()]
+    if not answered:
+        raise HTTPException(400, "No answers provided.")
+
+    card_id = str(uuid.uuid4())
+    structured_summary = "\n\n".join(f"Q: {a.question}\nA: {a.answer}" for a in answered)
+
+    collection = get_documents_collection()
+    vector = await embeddings.embed(structured_summary)
+    collection.add(
+        ids=[f"capture_{card_id}"],
+        documents=[structured_summary],
+        metadatas=[{
+            "doc_id": card_id,
+            "equipment_id": payload.equipment_id or "",
+            "page": 1,
+            "file_name": f"knowledge_capture_{card_id[:8]}",
+            "doc_type": "knowledge_capture",
+        }],
+        embeddings=[vector],
+    )
+
+    return CaptureSubmitResponse(cardId=card_id, structuredSummary=structured_summary, stored=True)
+
+
+# --- Day 6: AI Action Engine ---
+
+@app.post("/actions/generate", response_model=ActionGenerateResponse)
+async def generate_action(payload: ActionGenerateRequest):
+    """Generates an RCA report, maintenance checklist, inspection
+    schedule, or audit report — grounded in whatever's been ingested
+    for the given equipment, same retrieval as the Knowledge Agent uses.
+    This is the Action Generation step in the Demo Flow: triggered from
+    the same context a query was just answered in, not a separate
+    disconnected feature."""
+    try:
+        result = await action_engine.generate_action(
+            action_type=payload.action_type,
+            query=payload.query or "",
+            equipment_id=payload.equipment_id,
+            user_role=payload.user_role or "technician",
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    return ActionGenerateResponse(**result)

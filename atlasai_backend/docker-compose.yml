@@ -1,0 +1,40 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    container_name: atlasai_api
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+      - ./app:/code/app
+      - ./chroma_db:/code/chroma_db
+
+    env_file:
+      - .env
+
+    environment:
+      # Overrides .env if set. SigNoz (deployed via `foundryctl cast -f
+      # casting.yaml`, see casting.yaml at repo root) publishes its OTLP
+      # HTTP port to the HOST at localhost:4318 — but "localhost" inside
+      # this container refers to the container itself, not the host, so
+      # we route through the special host.docker.internal DNS name
+      # instead (works out of the box on Docker Desktop; on Linux the
+      # extra_hosts entry below makes it work too).
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://host.docker.internal:4318}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-atlasai-backend}
+
+    extra_hosts:
+      # Required on Linux for host.docker.internal to resolve; Docker
+      # Desktop (Mac/Windows) provides this automatically but the line
+      # is harmless there too.
+      - "host.docker.internal:host-gateway"
+
+    restart: unless-stopped
+
+# Running the backend directly with `uvicorn app.main:app` instead of
+# in Docker (simpler for local dev)? Set OTEL_EXPORTER_OTLP_ENDPOINT=
+# http://localhost:4318 in .env instead — no host.docker.internal
+# workaround needed since there's no container boundary to cross.
